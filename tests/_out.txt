@@ -1,13 +1,16 @@
-"01_ステージ2_0（歪んだ生態系：砂漠）_1.uexp"
-"BoneWeightMaterial.uexp"
-"CharacterDetailPanel.uexp"
-"DataTable_1.uasset"
-"DefaultDeferredDecalMaterial.uexp"
-"Font_1.uasset"
-"Font_6.uasset"
-"GridCombatCharacterList.uexp"
-"NavigationGameMode.uexp"
-"SoundWave_1.uasset"
-"SpaceCombatTutorialSpeechBubbles.uexp"
-"Texture2D_1.uasset"
-"UserDefinedEnum_1.uasset"
+EMPTY_TEST 
+Usage: TextExtractor <root_dir> [options]
+
+Options:
+  --raw <signature>   Enable raw text scanning using given signature (can repeat)
+  --raw all           Enable raw text scanning for all files
+  --all-uexps         Also scan loose .uexp files
+  -Filter             Enable text filtering (remove entries with '_', only {xxx} blocks, or pure numbers)
+  --help              Show this help message
+
+ 
+EXTRACT_TO_LOCRES_TEST 
+ 
+EXTRACT_TO_OLD_LOCRES_TEST 
+ 
+EXTRACT_TO_TXT_TEST 

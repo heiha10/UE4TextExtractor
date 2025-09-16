@@ -1,40 +1,83 @@
-#include <fstream>
+﻿#include <fstream>
 #include <filesystem>
 #include <array>
 #include <vector>
 #include <string>
 #include <optional>
-#include <codecvt>
 #include <iostream>
 #include <set>
+#include <map>
+#include <codecvt>
+#include <sstream>
 
 #include <windows.h>
+#include <regex>
+#include <unicode/uchar.h>
+
+// global.h 或 main.cpp
+extern std::set<std::wstring> g_protect_words;
+
+// main.cpp
+std::set<std::wstring> g_protect_words;
+
+
+std::set<std::wstring> load_protect_words(const std::string& filename)
+{
+	std::set<std::wstring> words;
+	std::ifstream file(filename);
+	if (!file.is_open())
+	{
+		// ❌ 原来：std::wcerr << L"❌ 无法打开保护词文件: " << std::wstring(filename.begin(), filename.end()) << std::endl;
+		// ✅ 改成：
+		std::cerr << "❌ 无法打开保护词文件: " << filename << std::endl;
+		return words;
+	}
+
+	std::string line;
+	while (std::getline(file, line))
+	{
+		auto start = line.find_first_not_of(" \t\r\n");
+		if (start == std::string::npos) continue;
+		auto end = line.find_last_not_of(" \t\r\n");
+		line = line.substr(start, end - start + 1);
+
+		if (!line.empty())
+		{
+			std::wstring wline;
+			for (char c : line)
+				wline += static_cast<wchar_t>(static_cast<unsigned char>(c));
+			words.insert(wline);
+		}
+	}
+
+	file.close();
+
+	// ❌ 原来：std::wcout << L"✅ 成功加载 " << words.size() << L" 个保护词" << std::endl;
+	// ✅ 改成：
+	std::cout << "✅ 成功加载 " << words.size() << " 个保护词" << std::endl;
+
+	return words;
+}
 
 struct FText
 {
 	std::wstring ns;
 	std::wstring key;
 	std::wstring s;
+
+	std::wstring src;
 };
 
-template <class T, size_t S>
-bool test_signature(std::array<T, S> signature, std::vector<char> const& buffer, size_t index)
+inline bool test_signature(std::string_view const& signature, std::vector<char> const& buffer, size_t index)
 {
-	if (buffer.size() < index + signature.size())
-		return false;
-	for (size_t i = 0; i < signature.size(); ++i)
-		if (buffer[index + i] != signature[i])
-			return false;
-	return true;
+	return std::string_view(buffer.data() + index, buffer.size() - index).starts_with(signature);
 }
 
 bool good_ch(wchar_t ch)
 {
-	if (std::isprint(ch, std::locale{}))
+	if (U_MASK(u_charType(ch)) & (~U_GC_C_MASK | U_GC_CF_MASK | U_GC_CS_MASK)) // all categories but controls + format controls and surrogate controls
 		return true;
-	if (ch == '\r')
-		return true;
-	if (ch == '\n')
+	if (0x09 <= ch && ch <= 0x0d || 0x1c <= ch && ch <= 0x1f) // some ISO format controls
 		return true;
 	return false;
 }
@@ -49,28 +92,111 @@ bool very_good_key(std::wstring const& key)
 	return true;
 }
 
-bool good_s(std::wstring const& s)
+bool all_white_spaces(std::wstring const& s)
 {
 	for (const auto c : s)
-		if (std::isalpha(c, std::locale{}))
+		if (!u_isspace(c))
+			return false;
+	return true;
+}
+bool has_letter(std::wstring const& s)
+{
+	for (const auto c : s)
+		if (u_isalpha(c))
 			return true;
 	return false;
 }
+bool filter_text(const std::wstring& text)
+{
 
+	// 1. 含下划线
+	{
+		if (g_protect_words.find(text) != g_protect_words.end())
+		{
+			return false; // 强制保留
+		}
+
+		// 🚫 多词拼接过滤器（你的正则）
+		static std::wregex re(LR"(^[A-Za-z][a-z]+([A-Z][a-z][a-z0-9]*)+$)");
+		if (std::regex_match(text, re))
+			return true;
+	}
+
+	// 2. 仅由 {} 包裹（可能多个）
+	{
+		static std::wregex re(LR"(^\{[^\}]+\}(?:\s*[ :]\s*\{[^\}]+\})*$)");
+		if (std::regex_match(text, re))
+			return true;
+	}
+
+	// 3. 纯数字
+	{
+		static std::wregex re(LR"(^(\d+|[^\w\s]{2,}|[^\w\s][A-Za-z])$)");
+		if (std::regex_match(text, re))
+			return true;
+	}
+	///没空格的多词拼接
+	{
+		// 🟢 动态保护列表（从文件加载）
+		static const auto& protect_list = g_protect_words; // 引用全局变量
+		if (protect_list.find(text) != protect_list.end())
+			return false; // 强制保留
+
+		// 🚫 过滤明显 CamelCase（要求每个单词部分有小写字母）
+		static std::wregex re(LR"(^[A-Za-z][a-z]+([A-Z][a-z][a-z0-9]*)+$)");
+		if (std::regex_match(text, re))
+			return true;
+	}
+
+	{
+		// 🎯 伪拉丁文常见词（不区分大小写）
+		static const std::vector<std::wstring> lorem_phrases = {
+				L"lorem ipsum",
+				L"dolor sit amet",
+				L"consectetur adipiscing",
+				L"adipiscing elit",
+				L"sed do eiusmod",
+				L"tempor incididunt",
+				L"labore et dolore",
+				L"magna aliqua",
+				L"ut enim ad",
+				L"quis nostrud",
+				L"ullamco laboris",
+				L"aliquip ex ea",
+				L"dolore eu fugiat",
+				L"sint occaecat",
+				L"cupidatat non proident"
+		};
+
+		int match_count = 0;
+		std::wstring lower_s = text;
+		std::transform(lower_s.begin(), lower_s.end(), lower_s.begin(), ::towlower);
+
+		for (const auto& phrase : lorem_phrases)
+		{
+			if (lower_s.find(phrase) != std::wstring::npos)
+			{
+				return true; // 找到完整短语 → 认定为伪拉丁文
+			}
+		}
+	}
+
+	return false; // 保留
+}
 std::optional<std::pair<FText, size_t>> try_read_blueprint_text(std::vector<char> const& buffer, size_t index)
 {
-	constexpr std::array<char, 2> BLUEPRINT_TEXT_SIGNATURE = { 0x29, 0x01 };
+	constexpr std::string_view BLUEPRINT_TEXT_SIGNATURE = "\x29\x01"; // EX_TextConst, EBlueprintTextLiteralType::LocalizedText
 
 	if (!test_signature(BLUEPRINT_TEXT_SIGNATURE, buffer, index))
 		return std::nullopt;
 
 	index += BLUEPRINT_TEXT_SIGNATURE.size();
 
-	const auto read_to_null = [&] () -> std::optional<std::wstring> {
+	const auto read_to_null = [&]() -> std::optional<std::wstring> {
 		if (buffer.size() <= index)
 			return std::nullopt;
 
-		if (buffer[index] == 0x1F) // ANSI
+		if (buffer[index] == 0x1F) // ANSI (EX_StringConst)
 		{
 			std::wstring s;
 			for (++index; index < buffer.size(); ++index)
@@ -88,7 +214,7 @@ std::optional<std::pair<FText, size_t>> try_read_blueprint_text(std::vector<char
 			return std::nullopt;
 		}
 
-		if (buffer[index] == 0x34) // UTF-16
+		if (buffer[index] == 0x34) // UTF-16 (EX_UnicodeStringConst)
 		{
 			std::wstring s;
 			for (++index; index < buffer.size(); index += 2)
@@ -109,7 +235,7 @@ std::optional<std::pair<FText, size_t>> try_read_blueprint_text(std::vector<char
 		}
 
 		return std::nullopt;
-	};
+		};
 
 	const auto s = read_to_null();
 	if (!s.has_value())
@@ -123,13 +249,20 @@ std::optional<std::pair<FText, size_t>> try_read_blueprint_text(std::vector<char
 		return std::nullopt;
 	if (128 < key->size())   // static const int32 InlineStringSize = 128;
 		return std::nullopt; // UE_CLOG(SaveNum > InlineStringSize, LogTextKey, VeryVerbose, TEXT("Key string '%s' was larger (%d) than the inline size (%d) and caused an allocation!"), OutStrBuffer.GetData(), SaveNum, InlineStringSize);
-	if (!very_good_key(key.value()) && !good_s(s.value()))
+	if (all_white_spaces(s.value()))
 		return std::nullopt;
 	const auto ns = read_to_null();
 	if (!ns.has_value())
 		return std::nullopt;
 	if (128 < ns->size())    // static const int32 InlineStringSize = 128;
 		return std::nullopt; // UE_CLOG(SaveNum > InlineStringSize, LogTextKey, VeryVerbose, TEXT("Key string '%s' was larger (%d) than the inline size (%d) and caused an allocation!"), OutStrBuffer.GetData(), SaveNum, InlineStringSize);
+	int good_score = 0;
+	if (very_good_key(key.value()))
+		good_score += 10;
+	if (has_letter(s.value()))
+		good_score += 5;
+	if (good_score < 5)
+		return std::nullopt;
 
 	return std::pair{ FText{ ns.value(), key.value(), s.value() }, index };
 }
@@ -151,16 +284,23 @@ std::optional<std::pair<FText, size_t>> try_read_ftext(std::vector<char> const& 
 	if (flag & 0b00010000) // InitializedFromString = (1 << 4) never set in cooked text
 		return std::nullopt;
 
+	// Strange, but some probably localizable text using this flag
+	//if (flag & 0b00000010) // ShouldGatherForLocalization: no CultureInvariant
+	//	return std::nullopt;
+
+	if (flag & 0b00000001) // ShouldGatherForLocalization: no Transient
+		return std::nullopt;
+
 	const auto history = *reinterpret_cast<const char*>(buffer.data() + index);
 	index += 1;
 
 	if (history != 0) // support only ETextHistoryType::Base right now, should we support None = -1?
 		return std::nullopt;
 
-	const auto read_string = [&] () -> std::optional<std::wstring> {
+	const auto read_string = [&]() -> std::optional<std::wstring> {
 		if (buffer.size() < index + 4)
 			return std::nullopt;
-		auto length = *reinterpret_cast<const int*>(buffer.data() + index);
+		auto length = static_cast<int64_t>(*reinterpret_cast<const int*>(buffer.data() + index));
 		index += 4;
 		if (length == 0)
 			return L"";
@@ -183,7 +323,7 @@ std::optional<std::pair<FText, size_t>> try_read_ftext(std::vector<char> const& 
 					return std::nullopt;
 				s += ch;
 			}
-			index += length + 2;
+			index += length * 2;
 			return s;
 		}
 		else
@@ -205,7 +345,7 @@ std::optional<std::pair<FText, size_t>> try_read_ftext(std::vector<char> const& 
 			index += length;
 			return s;
 		}
-	};
+		};
 
 	const auto ns = read_string();
 	if (!ns.has_value())
@@ -224,56 +364,392 @@ std::optional<std::pair<FText, size_t>> try_read_ftext(std::vector<char> const& 
 		return std::nullopt;
 	if (s->size() == 0)
 		return std::nullopt;
-	if (!very_good_key(key.value()) && !good_s(s.value()))
+	if (all_white_spaces(s.value()))
 		return std::nullopt;
 
-	const auto current_index = index;
+	int good_score = 0;
+	if (very_good_key(key.value()))
+		good_score += 10;
+	if (has_letter(s.value()))
+		good_score += 5;
 
-	const auto impostor_check = read_string();
-	if (impostor_check.has_value() && 0 < impostor_check->size())
+	const auto current_index = index;
+	if (good_score < 10)
+	{
+		const auto impostor_check = read_string();
+		if (impostor_check.has_value() && 0 < impostor_check->size())
+			good_score -= 5;
+	}
+
+	if (good_score < 5)
 		return std::nullopt;
 
 	return std::pair{ FText{ ns.value(), key.value(), s.value() }, current_index };
 }
 
-void file_extract(std::filesystem::path root, std::filesystem::path file, std::vector<FText> & texts)
+std::optional<std::pair<FText, size_t>> try_read_very_good_raw_text(std::vector<char> const& buffer, size_t index)
 {
-	if (!(file.extension() == ".uasset" || file.extension() == ".uexp" || file.extension() == ".umap"))
+	const auto read_string = [&]() -> std::optional<std::wstring> {
+		if (buffer.size() < index + 4)
+			return std::nullopt;
+		auto length = static_cast<int64_t>(*reinterpret_cast<const int*>(buffer.data() + index));
+		index += 4;
+		if (length == 0)
+			return L"";
+		if (length < 0)
+		{
+			length = -length;
+			if (buffer.size() < index + 2 * length)
+				return std::nullopt;
+			if (buffer[index + 2 * length - 2] != 0)
+				return std::nullopt;
+			if (buffer[index + 2 * length - 1] != 0)
+				return std::nullopt;
+			std::wstring s;
+			for (size_t i = index; i < index + 2 * length - 2; i += 2)
+			{
+				const auto ch = *reinterpret_cast<const wchar_t*>(buffer.data() + i);
+				if (ch == 0)
+					return std::nullopt;
+				if (!good_ch(ch))
+					return std::nullopt;
+				s += ch;
+			}
+			index += length * 2;
+			return s;
+		}
+		else
+		{
+			if (buffer.size() < index + length)
+				return std::nullopt;
+			if (buffer[index + length - 1] != 0)
+				return std::nullopt;
+			std::wstring s;
+			for (size_t i = index; i < index + length - 1; ++i)
+			{
+				const auto ch = buffer[i];
+				if (ch == 0)
+					return std::nullopt;
+				if (!good_ch(ch))
+					return std::nullopt;
+				s += ch;
+			}
+			index += length;
+			return s;
+		}
+		};
+
+	const auto ns = read_string();
+	if (!ns.has_value())
+		return std::nullopt;
+	if (128 < ns->size())    // static const int32 InlineStringSize = 128;
+		return std::nullopt; // UE_CLOG(SaveNum > InlineStringSize, LogTextKey, VeryVerbose, TEXT("Key string '%s' was larger (%d) than the inline size (%d) and caused an allocation!"), OutStrBuffer.GetData(), SaveNum, InlineStringSize);
+	if (ns->size() != 0)
+		return std::nullopt; // only empty namespaces supported!
+	const auto key = read_string();
+	if (!key.has_value())
+		return std::nullopt;
+	if (key->size() == 0)
+		return std::nullopt;
+	if (128 < key->size())   // static const int32 InlineStringSize = 128;
+		return std::nullopt; // UE_CLOG(SaveNum > InlineStringSize, LogTextKey, VeryVerbose, TEXT("Key string '%s' was larger (%d) than the inline size (%d) and caused an allocation!"), OutStrBuffer.GetData(), SaveNum, InlineStringSize);
+	if (!very_good_key(key.value()))
+		return std::nullopt; // only very good keys supported!
+	const auto s = read_string();
+	if (!s.has_value())
+		return std::nullopt;
+	if (s->size() == 0)
+		return std::nullopt;
+	if (all_white_spaces(s.value()))
+		return std::nullopt;
+	return std::pair{ FText{ ns.value(), key.value(), s.value() }, index };
+}
+
+std::optional<std::pair<std::vector<FText>, size_t>> try_read_string_table(std::vector<char> const& buffer, size_t index)
+{
+	if (buffer.size() < index + 12)
+		return std::nullopt;
+
+	const auto read_string = [&]() -> std::optional<std::wstring> {
+		if (buffer.size() < index + 4)
+			return std::nullopt;
+		auto length = static_cast<int64_t>(*reinterpret_cast<const int*>(buffer.data() + index));
+		index += 4;
+		if (length == 0)
+			return L"";
+		if (length < 0)
+		{
+			length = -length;
+			if (buffer.size() < index + 2 * length)
+				return std::nullopt;
+			if (buffer[index + 2 * length - 2] != 0)
+				return std::nullopt;
+			if (buffer[index + 2 * length - 1] != 0)
+				return std::nullopt;
+			std::wstring s;
+			for (size_t i = index; i < index + 2 * length - 2; i += 2)
+			{
+				const auto ch = *reinterpret_cast<const wchar_t*>(buffer.data() + i);
+				if (ch == 0)
+					return std::nullopt;
+				if (!good_ch(ch))
+					return std::nullopt;
+				s += ch;
+			}
+			index += length * 2;
+			return s;
+		}
+		else
+		{
+			if (buffer.size() < index + length)
+				return std::nullopt;
+			if (buffer[index + length - 1] != 0)
+				return std::nullopt;
+			std::wstring s;
+			for (size_t i = index; i < index + length - 1; ++i)
+			{
+				const auto ch = buffer[i];
+				if (ch == 0)
+					return std::nullopt;
+				if (!good_ch(ch))
+					return std::nullopt;
+				s += ch;
+			}
+			index += length;
+			return s;
+		}
+		};
+
+	const auto ns = read_string();
+	if (!ns.has_value())
+		return std::nullopt;
+	if (128 < ns->size())    // static const int32 InlineStringSize = 128;
+		return std::nullopt; // UE_CLOG(SaveNum > InlineStringSize, LogTextKey, VeryVerbose, TEXT("Key string '%s' was larger (%d) than the inline size (%d) and caused an allocation!"), OutStrBuffer.GetData(), SaveNum, InlineStringSize);
+
+	if (buffer.size() < index + 8)
+		return std::nullopt;
+
+	const auto size = *reinterpret_cast<const int*>(buffer.data() + index);
+	index += 4;
+	if (size < 1)
+		return std::nullopt;
+
+	std::vector<FText> table;
+
+	// size maybe very large
+	//table.reserve(size);
+
+	int good_score = 0;
+
+	for (size_t i = 0; i < size; ++i)
+	{
+		const auto key = read_string();
+		if (!key.has_value())
+			return std::nullopt;
+		if (key->size() == 0)
+		{
+			// sometimes happened, read string and ignore
+			const auto s = read_string();
+			if (!s.has_value())
+				return std::nullopt;
+			if (s->size() == 0)
+				good_score -= 2;
+			else
+				good_score -= 1000; // no key but with string? looking bad
+			continue;
+		}
+		if (128 < key->size())   // static const int32 InlineStringSize = 128;
+			return std::nullopt; // UE_CLOG(SaveNum > InlineStringSize, LogTextKey, VeryVerbose, TEXT("Key string '%s' was larger (%d) than the inline size (%d) and caused an allocation!"), OutStrBuffer.GetData(), SaveNum, InlineStringSize);
+		const auto s = read_string();
+		if (!s.has_value())
+			return std::nullopt;
+		if (s->size() == 0)
+		{
+			good_score -= 2;
+			continue;
+		}
+		if (all_white_spaces(s.value()))
+		{
+			good_score -= 1;
+			continue;
+		}
+		table.push_back(FText{ ns.value(), key.value(), s.value() });
+		good_score += 2;
+	}
+
+	if (good_score < 0)
+		return std::nullopt;
+
+	if (buffer.size() < index + 4)
+		return std::nullopt;
+
+	const auto metadata_size = *reinterpret_cast<const int*>(buffer.data() + index);
+	index += 4;
+	if (metadata_size < 0)
+		return std::nullopt;
+
+	return std::pair{ std::move(table), index };
+}
+
+void file_extract(std::filesystem::path root, std::filesystem::path file, std::vector<std::string> const& raw_text_signatures, bool all_uexps, std::vector<FText>& texts, bool g_enable_filter)
+{
+	if (!(file.extension() == L".uasset" || file.extension() == L".umap" || all_uexps && file.extension() == L".uexp"))
 		return;
 
-	std::wcout << std::filesystem::relative(file, root) << std::endl;
+	const auto replace_extension = [&](std::filesystem::path const& ext) {
+		auto copy = file;
+		return copy.replace_extension(ext);
+		};
+
+	if (file.extension() == L".uexp")
+	{
+		if (std::filesystem::exists(replace_extension(L".uasset")) || std::filesystem::exists(replace_extension(L".umap")))
+			return;
+	}
+
+	std::wstring src = std::filesystem::relative(file, root);
+
+	std::wcout << src << std::endl;
 
 	auto fin = std::ifstream{ file, std::ios::binary | std::ios::ate };
+	if (fin.fail())
+		return;
+
 	auto buffer = std::vector<char>(fin.tellg());
 	fin.seekg(0, std::ios::beg);
 	fin.read(buffer.data(), buffer.size());
+
+	bool has_blueprint = false;
+	bool has_text_property = false;
+	bool has_string_table = false;
+	bool has_very_good_raw_text = false;
+
+	if (raw_text_signatures.size() == 1 && raw_text_signatures.back() == "all")
+		has_very_good_raw_text = true;
+
+	if (file.extension() == L".uasset" || file.extension() == L".umap")
+	{
+		constexpr std::string_view BLUEPRINT_SIGNATURE = "Blueprint";
+		constexpr std::string_view TEXT_PROPERTY_SIGNATURE = "TextProperty";
+		constexpr std::string_view STRING_TABLE_SIGNATURE = "StringTable";
+
+		for (size_t i = 0; i < buffer.size(); ++i)
+		{
+			if (!has_blueprint && test_signature(BLUEPRINT_SIGNATURE, buffer, i))
+				has_blueprint = true;
+			if (!has_text_property && test_signature(TEXT_PROPERTY_SIGNATURE, buffer, i))
+				has_text_property = true;
+			if (!has_string_table && test_signature(STRING_TABLE_SIGNATURE, buffer, i))
+				has_string_table = true;
+			if (0 < raw_text_signatures.size() && !has_very_good_raw_text)
+			{
+				for (auto const& raw_text_signature : raw_text_signatures)
+					if (test_signature(raw_text_signature, buffer, i))
+					{
+						has_very_good_raw_text = true;
+						break;
+					}
+			}
+			if (has_blueprint && has_text_property && has_string_table && (raw_text_signatures.size() == 0 || has_very_good_raw_text))
+				break;
+		}
+
+		if (!(has_blueprint || has_text_property || has_string_table || has_very_good_raw_text))
+			return;
+
+		if (const auto uexp_file = replace_extension(L".uexp"); std::filesystem::exists(uexp_file))
+		{
+			src = std::filesystem::relative(uexp_file, root);
+
+			fin = std::ifstream{ uexp_file, std::ios::binary | std::ios::ate };
+			if (fin.fail())
+				return;
+			buffer = std::vector<char>(fin.tellg());
+			fin.seekg(0, std::ios::beg);
+			fin.read(buffer.data(), buffer.size());
+		}
+	}
+	else
+	{
+		has_blueprint = true;
+		has_text_property = true;
+		has_string_table = true;
+		if (0 < raw_text_signatures.size())
+			has_very_good_raw_text = true;
+	}
+
 	for (size_t i = 0; i < buffer.size(); ++i)
 	{
-		auto text = try_read_blueprint_text(buffer, i);
-		if (text.has_value())
+		if (has_blueprint)
 		{
-			texts.push_back(text.value().first);
-			i = text.value().second - 1;
-			continue;
+			if (const auto text = try_read_blueprint_text(buffer, i); text.has_value())
+			{
+				// ✅ 加过滤
+				if (!(g_enable_filter && filter_text(text.value().first.s)))
+				{
+					texts.push_back(text.value().first);
+					texts.back().src = src;
+				}
+				i = text.value().second - 1;
+				continue;
+			}
 		}
-		text = try_read_ftext(buffer, i);
-		if (text.has_value())
+		if (has_text_property)
 		{
-			texts.push_back(text.value().first);
-			i = text.value().second - 1;
-			continue;
+			if (const auto text = try_read_ftext(buffer, i); text.has_value())
+			{
+				// ✅ 加过滤
+				if (!(g_enable_filter && filter_text(text.value().first.s)))
+				{
+					texts.push_back(text.value().first);
+					texts.back().src = src;
+				}
+				i = text.value().second - 1;
+				continue;
+			}
+		}
+		if (has_string_table)
+		{
+			if (const auto table = try_read_string_table(buffer, i); table.has_value())
+			{
+				for (auto const& text : table.value().first)
+				{
+					// ✅ 加过滤
+					if (!(g_enable_filter && filter_text(text.s)))
+					{
+						texts.push_back(text);
+						texts.back().src = src;
+					}
+				}
+				i = table.value().second - 1;
+				continue;
+			}
+		}
+		if (has_very_good_raw_text)
+		{
+			if (const auto text = try_read_very_good_raw_text(buffer, i); text.has_value())
+			{
+				// ✅ 加过滤
+				if (!(g_enable_filter && filter_text(text.value().first.s)))
+				{
+					texts.push_back(text.value().first);
+					texts.back().src = src;
+				}
+				i = text.value().second - 1;
+				continue;
+			}
 		}
 	}
 }
 
-void directory_extract(std::filesystem::path root, std::filesystem::path directory, std::vector<FText> & texts)
+void directory_extract(std::filesystem::path root, std::filesystem::path directory, std::vector<std::string> const& raw_text_signatures, bool all_uexps, std::vector<FText>& texts, bool g_enable_filter)
 {
 	for (auto const& entry : std::filesystem::directory_iterator(directory))
 	{
 		if (entry.is_directory())
-			directory_extract(root, entry, texts);
+			directory_extract(root, entry, raw_text_signatures, all_uexps, texts, g_enable_filter);
 		else
-			file_extract(root, entry, texts);
+			file_extract(root, entry, raw_text_signatures, all_uexps, texts, g_enable_filter);
 	}
 }
 
@@ -351,43 +827,572 @@ namespace crc32
 	}
 }
 
-int wmain(int argc, wchar_t ** argv)
+void print_help()
 {
+	std::wcout
+		<< L"Extract localizable texts to locres or txt file:" << std::endl
+		<< L"UE4TextExtractor.exe <path to folder with extracted from pak files> <path to texts.locres file> [-old] [-raw-text-signatures=<signature1>,<signature2>,...] [-all-uexps]" << std::endl
+		<< L"UE4TextExtractor.exe <path to folder with extracted from pak files> <path to texts.txt file> [-raw-text-signatures=<signature1>,<signature2>,...] [-all-uexps] [-src]" << std::endl
+		<< LR"(Example: UE4TextExtractor.exe "C:\MyGame\Content\Paks\unpacked" "C:\MyGame\Content\Paks\texts.locres")" << std::endl
+		<< std::endl
+
+		<< L"Use -raw-text-signatures=<signature1>,<signature2>,... (or -raw-text-signatures=all if you don't want to go into detail, but it's not recommended) modifier for parsing localizable text by custom signatures. See also: https://github.com/VD42/UE4TextExtractor/blob/master/RAW_TEXT_SIGNATURES.md." << std::endl
+		<< L"Use -all-uexps modifier for additionaly parsing uexp files without matching uasset or umap files." << std::endl
+		<< L"Use -src modifier to add string source information (filenames) to the txt file." << std::endl
+		<< std::endl
+
+		<< L"Convert locres to txt or backward:" << std::endl
+		<< L"UE4TextExtractor.exe <path to texts.txt file> <path to texts.locres file> [-old]" << std::endl
+		<< L"UE4TextExtractor.exe <path to texts.locres file> <path to texts.txt file>" << std::endl
+		<< LR"(Example: UE4TextExtractor.exe "C:\MyGame\Content\Paks\texts.txt" "C:\MyGame\Content\Paks\texts.locres")" << std::endl
+		<< std::endl
+
+		<< L"Use -old modifier for old-version locres file generation." << std::endl
+		<< std::endl
+
+		<< L"Add or replace all texts from one txt to another:" << std::endl
+		<< L"UE4TextExtractor.exe <path to source_texts.txt file> <path to destination_texts.txt file>" << std::endl
+		<< LR"(Example: UE4TextExtractor.exe "C:\MyGame\Content\Paks\en_texts.txt" "C:\MyGame\Content\Paks\cn_texts.txt")" << std::endl
+		<< std::endl
+		;
+}
+
+std::wstring replace_all(std::wstring s, std::wstring const& from, std::wstring const& to)
+{
+	size_t pos = 0;
+	while ((pos = s.find(from, pos)) != std::wstring::npos)
+	{
+		s.replace(pos, from.length(), to);
+		pos += from.length();
+	}
+	return s;
+}
+
+std::wstring escape_key(std::wstring key)
+{
+	key = replace_all(key, L"\r", L"&#x000013;");
+	key = replace_all(key, L"\n", L"&#x000010;");
+	key = replace_all(key, L"[", L"&#x000091;");
+	key = replace_all(key, L"]", L"&#x000093;");
+	key = replace_all(key, L"{", L"&#x000123;");
+	key = replace_all(key, L"}", L"&#x000125;");
+	return key;
+}
+
+std::wstring unescape_key(std::wstring key)
+{
+	key = replace_all(key, L"&#x000013;", L"\r");
+	key = replace_all(key, L"&#x000010;", L"\n");
+	key = replace_all(key, L"&#x000091;", L"[");
+	key = replace_all(key, L"&#x000093;", L"]");
+	key = replace_all(key, L"&#x000123;", L"{");
+	key = replace_all(key, L"&#x000125;", L"}");
+	return key;
+}
+
+struct FEntry
+{
+	std::wstring key;
+	uint32_t hash;
+	std::wstring s;
+
+	std::wstring src;
+};
+
+using locres_vector = std::vector<std::pair<std::wstring, std::vector<FEntry>>>;
+
+locres_vector read_txt_file(std::filesystem::path file)
+{
+	locres_vector lv;
+
+	auto fin = std::ifstream{ file, std::ios::binary | std::ios::ate };
+	auto buffer = std::vector<char>(static_cast<size_t>(fin.tellg()) + 1);
+	fin.seekg(0, std::ios::beg);
+	fin.read(buffer.data(), buffer.size() - 1);
+
+	std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+	std::wstring lines = converter.from_bytes(buffer.data());
+	auto stream = std::wstringstream{ lines };
+
+	std::wstring line;
+	int mode = 0;
+	while (std::getline(stream, line))
+	{
+		if (4 < line.length() && line.substr(0, 4) == L"=># ")
+		{
+			if (mode == 1)
+				lv.back().second.back().s = lv.back().second.back().s.substr(0, lv.back().second.back().s.length() - 4);
+
+			mode = 0;
+			continue;
+		}
+		if (5 < line.length() && line.substr(0, 3) == L"=>[")
+		{
+			if (mode == 1)
+				lv.back().second.back().s = lv.back().second.back().s.substr(0, lv.back().second.back().s.length() - 4);
+
+			line = line.substr(3);
+			const auto key = unescape_key(line.substr(0, line.find(L"]")));
+			line = line.substr(line.find(L"[") + 1);
+			const auto hash = std::stoul(line.substr(0, line.find(L"]")));
+			lv.back().second.push_back(FEntry{ key, hash, L"" });
+			mode = 1;
+			continue;
+		}
+		if (3 < line.length() && line.substr(0, 3) == L"=>{")
+		{
+			if (mode == 1)
+				lv.back().second.back().s = lv.back().second.back().s.substr(0, lv.back().second.back().s.length() - 4);
+
+			const auto ns = unescape_key(line.substr(3, line.find(L"}") - 3));
+			if (ns == L"[END]")
+				break;
+			lv.emplace_back();
+			lv.back().first = ns;
+			mode = 0;
+			continue;
+		}
+		if (mode == 1)
+			lv.back().second.back().s += line + L"\n";
+	}
+
+	return lv;
+}
+
+void write_to_txt_file(locres_vector const& lv, std::filesystem::path file, bool src)
+{
+	std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+	auto fout = std::ofstream{ file, std::ios::binary | std::ios::out };
+	std::wstring last_src = L"";
+	for (auto const& ns : lv)
+	{
+		const auto escaped_ns = converter.to_bytes(escape_key(ns.first));
+		fout << "=>{" << escaped_ns << "}" << '\r' << '\n' << '\r' << '\n';
+		for (auto const& text : ns.second)
+		{
+			if (src && text.src != last_src)
+			{
+				const auto src_comment = converter.to_bytes(text.src);
+				fout << "=># " << src_comment << '\r' << '\n' << '\r' << '\n';
+				last_src = text.src;
+			}
+			const auto escaped_key = converter.to_bytes(escape_key(text.key));
+			const auto s = converter.to_bytes(text.s);
+			fout << "=>[" << escaped_key << "][" << text.hash << "]" << '\r' << '\n' << s << '\r' << '\n' << '\r' << '\n';
+		}
+	}
+	fout << "=>{[END]}" << '\r' << '\n' << std::flush;
+}
+
+static const auto magic = std::vector<unsigned char>{
+	0x0E, 0x14, 0x74, 0x75, 0x67, 0x4A, 0x03, 0xFC, 0x4A, 0x15, 0x90, 0x9D, 0xC3, 0x37, 0x7F, 0x1B
+};
+
+void write_to_locres_file(bool old, locres_vector const& lv, std::filesystem::path file)
+{
+	auto fout = std::ofstream{ file, std::ios::binary | std::ios::out };
+
+	std::streampos strings_array_offset_placeholder_offset;
+
+	if (!old)
+	{
+		fout.write(reinterpret_cast<const char*>(magic.data()), magic.size());
+
+		const uint8_t version = 1;
+		fout.write(reinterpret_cast<const char*>(&version), sizeof(uint8_t));
+
+		const int64_t strings_array_offset_placeholder = 0;
+		strings_array_offset_placeholder_offset = fout.tellp();
+		fout.write(reinterpret_cast<const char*>(&strings_array_offset_placeholder), sizeof(int64_t));
+	}
+
+	const uint32_t namespace_count = static_cast<const uint32_t>(lv.size());
+	fout.write(reinterpret_cast<const char*>(&namespace_count), sizeof(uint32_t));
+
+	std::vector<std::wstring> strings;
+	std::map<std::wstring, int32_t> strings_map;
+
+	const auto write_string = [&](std::wstring s) {
+		if (s.length() == 0)
+		{
+			const int32_t length = 0;
+			fout.write(reinterpret_cast<const char*>(&length), sizeof(int32_t));
+			return;
+		}
+		bool need_unicode = false;
+		for (auto const& c : s)
+			if (!(0x00 <= c && c <= 0x7F))
+			{
+				need_unicode = true;
+				break;
+			}
+		if (need_unicode)
+		{
+			const int32_t length = -static_cast<int32_t>(s.length()) - 1;
+			fout.write(reinterpret_cast<const char*>(&length), sizeof(int32_t));
+			fout.write(reinterpret_cast<const char*>(s.c_str()), s.length() * 2);
+			const uint16_t zero = 0;
+			fout.write(reinterpret_cast<const char*>(&zero), sizeof(uint16_t));
+		}
+		else
+		{
+			const int32_t length = static_cast<int32_t>(s.length()) + 1;
+			fout.write(reinterpret_cast<const char*>(&length), sizeof(int32_t));
+			for (auto const& c : s)
+				fout.write(reinterpret_cast<const char*>(&c), sizeof(char));
+			const uint8_t zero = 0;
+			fout.write(reinterpret_cast<const char*>(&zero), sizeof(uint8_t));
+		}
+		};
+
+	for (auto const& ns : lv)
+	{
+		write_string(ns.first);
+		const uint32_t key_count = static_cast<const uint32_t>(ns.second.size());
+		fout.write(reinterpret_cast<const char*>(&key_count), sizeof(uint32_t));
+		for (auto const& text : ns.second)
+		{
+			write_string(text.key);
+			fout.write(reinterpret_cast<const char*>(&text.hash), sizeof(uint32_t));
+			if (!old)
+			{
+				int32_t index = 0;
+				if (const auto it = strings_map.find(text.s); it == strings_map.end())
+				{
+					index = static_cast<int32_t>(strings.size());
+					strings_map.emplace(text.s, index);
+					strings.push_back(text.s);
+				}
+				else
+				{
+					index = it->second;
+				}
+				fout.write(reinterpret_cast<const char*>(&index), sizeof(int32_t));
+			}
+			else
+			{
+				write_string(text.s);
+			}
+		}
+	}
+
+	if (!old)
+	{
+		const int64_t strings_array_offset = fout.tellp();
+		const uint32_t strings_array_count = static_cast<uint32_t>(strings.size());
+		fout.write(reinterpret_cast<const char*>(&strings_array_count), sizeof(uint32_t));
+		for (auto const& s : strings)
+			write_string(s);
+		fout.seekp(strings_array_offset_placeholder_offset);
+		fout.write(reinterpret_cast<const char*>(&strings_array_offset), sizeof(int64_t));
+	}
+}
+
+int wmain(int argc, wchar_t** argv)
+{
+	// 加载保护词
+	g_protect_words = load_protect_words("protect_words.txt");
+
 	std::locale::global(std::locale{ std::locale::classic(), "en_US.UTF-8", std::locale::ctype });
 
 	SetConsoleOutputCP(CP_UTF8);
 	SetConsoleCP(CP_UTF8);
 
-	if (argc < 3)
+	std::vector<std::wstring_view> args;
+	for (size_t i = 0; i < argc; ++i)
+		args.emplace_back(argv[i]);
+
+	if (args.size() < 3)
 	{
-		std::wcout
-			<< L"UE4TextExtractor.exe <path to folder with extracted from pak files> <path to locres.txt file>" << std::endl << std::endl
-			<< LR"(Example: UE4TextExtractor.exe "C:\MyGame\Content\Paks\unpacked" "C:\MyGame\Content\Paks\texts_to_locres.txt")" << std::endl
-		;
+		print_help();
 		return 1;
 	}
 
-	std::vector<FText> texts;
-	directory_extract(std::wstring(argv[1]), std::wstring(argv[1]), texts);
+	constexpr std::wstring_view old_argument = L"-old";
+	constexpr std::wstring_view raw_text_signatures_argument = L"-raw-text-signatures=";
+	constexpr std::wstring_view all_uexps_argument = L"-all-uexps";
+	constexpr std::wstring_view src_argument = L"-src";
+	constexpr std::wstring_view filter_argument = L"-Filter";
 
-	std::set<std::wstring> namespaces;
-	for (auto const& text : texts)
-		namespaces.insert(text.ns);
-	auto fout = std::wofstream{ std::wstring(argv[2]), std::ios::binary | std::ios::out };
-	for (auto const& ns : namespaces)
+	const auto path_left = std::filesystem::path(args[1]);
+	const auto path_right = std::filesystem::path(args[2]);
+	bool old = false;
+	bool all_uexps = false;
+	std::vector<std::string> raw_text_signatures;
+	bool src = false;
+	bool g_enable_filter = false;
+
+	for (size_t i = 3; i < args.size(); ++i)
 	{
-		fout << L"=>{" << ns << L"}" << '\r' << '\n' << '\r' << '\n';
-		std::set<std::wstring> unique_check;
-		for (auto const& text : texts)
+		if (args[i] == old_argument)
 		{
-			if (text.ns != ns)
-				continue;
-			if (unique_check.find(text.key) != unique_check.end())
-				continue;
-			unique_check.insert(text.key);
-			fout << L"=>[" << text.key << L"][" << crc32::StrCrc32(text.s) << L"]" << '\r' << '\n' << text.s << '\r' << '\n' << '\r' << '\n';
+			old = true;
+			continue;
+		}
+		if (args[i] == all_uexps_argument)
+		{
+			all_uexps = true;
+			continue;
+		}
+		if (args[i] == src_argument)
+		{
+			src = true;
+			continue;
+		}
+		if (args[i].starts_with(raw_text_signatures_argument))
+		{
+			const auto wtos = [](std::wstring_view const& s) {
+				std::string result;
+				for (auto c : s)
+					result += static_cast<char>(c);
+				return result;
+				};
+			auto raw_text_signatures_value = args[i];
+			raw_text_signatures_value.remove_prefix(raw_text_signatures_argument.size());
+			size_t pos = -1;
+			while ((pos = raw_text_signatures_value.find(L",")) != std::wstring_view::npos)
+			{
+				raw_text_signatures.push_back(wtos(raw_text_signatures_value.substr(0, pos)));
+				raw_text_signatures_value.remove_prefix(pos + 1);
+			}
+			if (0 < raw_text_signatures_value.size())
+				raw_text_signatures.push_back(wtos(raw_text_signatures_value));
+			continue;
+		}
+		if (args[i] == filter_argument)
+		{
+			g_enable_filter = true;
+			continue;
 		}
 	}
-	fout << L"=>{[END]}" << '\r' << '\n';
-	return 0;
+
+	if (std::filesystem::is_directory(path_left))
+	{
+		std::vector<FText> texts;
+		directory_extract(path_left, path_left, raw_text_signatures, all_uexps, texts, g_enable_filter);
+		std::set<std::wstring> namespaces;
+		for (auto const& text : texts)
+			namespaces.insert(text.ns);
+		locres_vector lv;
+		lv.reserve(namespaces.size());
+		for (auto const& ns : namespaces)
+		{
+			lv.emplace_back();
+			lv.back().first = ns;
+			std::set<std::wstring> unique_check;
+			for (auto const& text : texts)
+			{
+				if (text.ns != ns)
+					continue;
+				if (unique_check.find(text.key) != unique_check.end())
+					continue;
+				unique_check.insert(text.key);
+				lv.back().second.push_back(FEntry{ text.key, crc32::StrCrc32(text.s), text.s, text.src });
+			}
+		}
+
+		if (path_right.extension() == L".txt")
+		{
+			write_to_txt_file(lv, path_right, src);
+			return 0;
+		}
+		else if (path_right.extension() == L".locres")
+		{
+			write_to_locres_file(old, lv, path_right);
+			return 0;
+		}
+		else
+		{
+			print_help();
+			return 1;
+		}
+	}
+	else if (path_left.extension() == L".locres" && path_right.extension() == L".txt")
+	{
+		auto fin = std::ifstream{ path_left, std::ios::binary | std::ios::ate };
+		auto buffer = std::vector<char>(fin.tellg());
+		fin.seekg(0, std::ios::beg);
+		fin.read(buffer.data(), buffer.size());
+
+		uint8_t version = 0;
+		size_t index = 0;
+
+		if (magic.size() <= buffer.size())
+		{
+			bool found = true;
+			for (size_t i = 0; i < magic.size(); ++i)
+				if (static_cast<unsigned char>(buffer[i]) != magic[i])
+				{
+					found = false;
+					break;
+				}
+			if (found)
+			{
+				index += magic.size();
+				version = *reinterpret_cast<const uint8_t*>(buffer.data() + index);
+				index += sizeof(uint8_t);
+			}
+		}
+
+		if (!(0 <= version && version <= 4))
+		{
+			std::wcout << L"ERROR: LocRes format too new!" << std::endl;
+			return 1;
+		}
+
+		if (version == 4)
+			std::wcout << L"WARNING: LocRes version 4 is undocumented, may not work properly!" << std::endl;
+
+		const auto read_string = [&]() -> std::wstring {
+			auto length = static_cast<int64_t>(*reinterpret_cast<const int*>(buffer.data() + index));
+			index += 4;
+			if (length == 0)
+				return L"";
+			if (length < 0)
+			{
+				length = -length;
+				std::wstring s;
+				for (size_t i = index; i < index + 2 * length - 2; i += 2)
+				{
+					const auto ch = *reinterpret_cast<const wchar_t*>(buffer.data() + i);
+					s += ch;
+				}
+				index += length * 2;
+				return s;
+			}
+			else
+			{
+				std::wstring s;
+				for (size_t i = index; i < index + length - 1; ++i)
+				{
+					const auto ch = buffer[i];
+					s += ch;
+				}
+				index += length;
+				return s;
+			}
+			};
+
+		std::vector<std::wstring> strings;
+
+		if (1 <= version)
+		{
+			const auto strings_array_offset = *reinterpret_cast<const int64_t*>(buffer.data() + index);
+			index += sizeof(int64_t);
+
+			const auto restore_index_point = index;
+
+			index = strings_array_offset;
+
+			const auto strings_array_count = *reinterpret_cast<const uint32_t*>(buffer.data() + index);
+			index += sizeof(uint32_t);
+
+			strings.reserve(strings_array_count);
+
+			for (size_t i = 0; i < strings_array_count; ++i)
+			{
+				strings.push_back(read_string());
+				if (2 <= version)
+					index += sizeof(int32_t);
+			}
+
+			index = restore_index_point;
+		}
+
+		if (2 <= version)
+			index += sizeof(uint32_t);
+
+		const auto namespace_count = *reinterpret_cast<const uint32_t*>(buffer.data() + index);
+		index += sizeof(uint32_t);
+
+		locres_vector lv;
+		lv.reserve(namespace_count);
+
+		for (size_t i = 0; i < namespace_count; ++i)
+		{
+			if (2 <= version)
+				index += sizeof(uint32_t);
+
+			const auto ns = read_string();
+
+			const auto key_count = *reinterpret_cast<const uint32_t*>(buffer.data() + index);
+			index += sizeof(uint32_t);
+
+			lv.emplace_back();
+			lv.back().first = ns;
+			lv.back().second.reserve(key_count);
+
+			for (size_t j = 0; j < key_count; ++j)
+			{
+				if (2 <= version)
+					index += sizeof(uint32_t);
+
+				const auto key = read_string();
+
+				const auto hash = *reinterpret_cast<const uint32_t*>(buffer.data() + index);
+				index += sizeof(uint32_t);
+
+				std::wstring str;
+				if (1 <= version)
+				{
+					const auto str_index = *reinterpret_cast<const int32_t*>(buffer.data() + index);
+					index += sizeof(int32_t);
+					str = strings[str_index];
+				}
+				else
+				{
+					str = read_string();
+				}
+
+				if (4 <= version) // WARNING: LocRes version 4 is undocumented: https://dev.epicgames.com/documentation/en-us/unreal-engine/API/Runtime/Core/Internationalization/FTextLocalizationResourceVersion/ELocResVersion
+					index += sizeof(uint32_t);
+
+				lv.back().second.push_back(FEntry{ key, hash, str });
+			}
+		}
+
+		write_to_txt_file(lv, path_right, false);
+
+		return 0;
+	}
+	else if (path_left.extension() == L".txt" && path_right.extension() == L".locres")
+	{
+		const auto lv = read_txt_file(path_left);
+		write_to_locres_file(old, lv, path_right);
+		return 0;
+	}
+	else if (path_left.extension() == L".txt" && path_right.extension() == L".txt")
+	{
+		const auto lv_src = read_txt_file(path_left);
+		auto lv = read_txt_file(path_right);
+
+		for (auto const& ns_src : lv_src)
+		{
+			auto& ns = [&]() -> std::pair<std::wstring, std::vector<FEntry>>& {
+				for (auto& ns_dst : lv)
+					if (ns_dst.first == ns_src.first)
+						return ns_dst;
+				lv.emplace_back(ns_src.first, std::vector<FEntry>{});
+				return lv.back();
+				}();
+
+			for (auto const& text_src : ns_src.second)
+			{
+				auto& text = [&]() -> FEntry& {
+					for (auto& text_dst : ns.second)
+						if (text_dst.key == text_src.key && text_dst.hash == text_src.hash)
+							return text_dst;
+					ns.second.emplace_back(FEntry{ text_src.key, text_src.hash });
+					return ns.second.back();
+					}();
+				text.s = text_src.s;
+			}
+		}
+
+		write_to_txt_file(lv, path_right, false);
+		return 0;
+	}
+
+	print_help();
+	return 1;
 }
