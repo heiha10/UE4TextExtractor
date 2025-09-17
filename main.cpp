@@ -1,4 +1,5 @@
-﻿#include <fstream>
+﻿
+#include <fstream>
 #include <filesystem>
 #include <array>
 #include <vector>
@@ -13,50 +14,80 @@
 #include <windows.h>
 #include <regex>
 #include <unicode/uchar.h>
+#include <Shlwapi.h>
 
-// global.h 或 main.cpp
-extern std::set<std::wstring> g_protect_words;
 
-// main.cpp
+// ========== 全局变量 ==========
+
 std::set<std::wstring> g_protect_words;
+std::vector<std::wstring> g_protect_words_list_for_stats;
+std::vector<std::wregex> g_protect_regexes;
+
+// 🆕 定义统计变量（必须带初始值！）
+unsigned __int64 g_total_read = 0;
+unsigned __int64 g_total_filtered = 0;
+unsigned __int64 g_total_kept = 0;
 
 
-std::set<std::wstring> load_protect_words(const std::string& filename)
+// ========== 函数声明 ==========
+std::wstring utf8_to_wstring(const std::string& str);
+std::string wstring_to_utf8(const std::wstring& wstr);
+
+// ========== 函数实现 ==========
+std::wstring utf8_to_wstring(const std::string& str)
 {
-	std::set<std::wstring> words;
-	std::ifstream file(filename);
-	if (!file.is_open())
-	{
-		// ❌ 原来：std::wcerr << L"❌ 无法打开保护词文件: " << std::wstring(filename.begin(), filename.end()) << std::endl;
-		// ✅ 改成：
-		std::cerr << "❌ 无法打开保护词文件: " << filename << std::endl;
-		return words;
+	if (str.empty()) return L"";
+	int size_needed = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), (int)str.size(), nullptr, 0);
+	std::wstring wstr(size_needed, 0);
+	MultiByteToWideChar(CP_UTF8, 0, str.c_str(), (int)str.size(), &wstr[0], size_needed);
+	return wstr;
+}
+
+std::string wstring_to_utf8(const std::wstring& wstr)
+{
+	if (wstr.empty()) return "";
+	int size_needed = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), nullptr, 0, nullptr, nullptr);
+	std::string str(size_needed, 0);
+	WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), &str[0], size_needed, nullptr, nullptr);
+	return str;
+}
+
+// ========== 你的 CSV 读取函数 ==========
+std::vector<std::wstring> read_csv_all_cells_exclude_first_row(const std::wstring& filename)
+{
+	std::vector<std::wstring> result;
+	std::string fname = wstring_to_utf8(filename);
+
+	std::ifstream file(fname);
+	if (!file.is_open()) {
+		std::wcout << L"❌ 无法打开文件: " << filename << L"\n";
+		return result;
 	}
 
 	std::string line;
-	while (std::getline(file, line))
-	{
-		auto start = line.find_first_not_of(" \t\r\n");
-		if (start == std::string::npos) continue;
-		auto end = line.find_last_not_of(" \t\r\n");
-		line = line.substr(start, end - start + 1);
+	bool firstLine = true;
 
-		if (!line.empty())
-		{
-			std::wstring wline;
-			for (char c : line)
-				wline += static_cast<wchar_t>(static_cast<unsigned char>(c));
-			words.insert(wline);
+	while (std::getline(file, line)) {
+		if (firstLine) {
+			firstLine = false;
+			continue;
+		}
+
+		if (line.empty()) continue;
+
+		std::istringstream ss(line);
+		std::string cell;
+		while (std::getline(ss, cell, ',')) {
+			cell.erase(0, cell.find_first_not_of(" \t\r\n"));
+			cell.erase(cell.find_last_not_of(" \t\r\n") + 1);
+			if (!cell.empty()) {
+				result.push_back(utf8_to_wstring(cell));
+			}
 		}
 	}
 
 	file.close();
-
-	// ❌ 原来：std::wcout << L"✅ 成功加载 " << words.size() << L" 个保护词" << std::endl;
-	// ✅ 改成：
-	std::cout << "✅ 成功加载 " << words.size() << " 个保护词" << std::endl;
-
-	return words;
+	return result;
 }
 
 struct FText
@@ -82,6 +113,7 @@ bool good_ch(wchar_t ch)
 	return false;
 }
 
+
 bool very_good_key(std::wstring const& key)
 {
 	if (key.size() != 32)
@@ -106,82 +138,78 @@ bool has_letter(std::wstring const& s)
 			return true;
 	return false;
 }
+
+
 bool filter_text(const std::wstring& text)
 {
+	g_total_read++;
 
-	// 1. 含下划线
+	for (const auto& re : g_protect_regexes)
 	{
-		if (g_protect_words.find(text) != g_protect_words.end())
+		if (std::regex_search(text, re))
 		{
-			return false; // 强制保留
-		}
-
-		// 🚫 多词拼接过滤器（你的正则）
-		static std::wregex re(LR"(^[A-Za-z][a-z]+([A-Z][a-z][a-z0-9]*)+$)");
-		if (std::regex_match(text, re))
-			return true;
-	}
-
-	// 2. 仅由 {} 包裹（可能多个）
-	{
-		static std::wregex re(LR"(^\{[^\}]+\}(?:\s*[ :]\s*\{[^\}]+\})*$)");
-		if (std::regex_match(text, re))
-			return true;
-	}
-
-	// 3. 纯数字
-	{
-		static std::wregex re(LR"(^(\d+|[^\w\s]{2,}|[^\w\s][A-Za-z])$)");
-		if (std::regex_match(text, re))
-			return true;
-	}
-	///没空格的多词拼接
-	{
-		// 🟢 动态保护列表（从文件加载）
-		static const auto& protect_list = g_protect_words; // 引用全局变量
-		if (protect_list.find(text) != protect_list.end())
-			return false; // 强制保留
-
-		// 🚫 过滤明显 CamelCase（要求每个单词部分有小写字母）
-		static std::wregex re(LR"(^[A-Za-z][a-z]+([A-Z][a-z][a-z0-9]*)+$)");
-		if (std::regex_match(text, re))
-			return true;
-	}
-
-	{
-		// 🎯 伪拉丁文常见词（不区分大小写）
-		static const std::vector<std::wstring> lorem_phrases = {
-				L"lorem ipsum",
-				L"dolor sit amet",
-				L"consectetur adipiscing",
-				L"adipiscing elit",
-				L"sed do eiusmod",
-				L"tempor incididunt",
-				L"labore et dolore",
-				L"magna aliqua",
-				L"ut enim ad",
-				L"quis nostrud",
-				L"ullamco laboris",
-				L"aliquip ex ea",
-				L"dolore eu fugiat",
-				L"sint occaecat",
-				L"cupidatat non proident"
-		};
-
-		int match_count = 0;
-		std::wstring lower_s = text;
-		std::transform(lower_s.begin(), lower_s.end(), lower_s.begin(), ::towlower);
-
-		for (const auto& phrase : lorem_phrases)
-		{
-			if (lower_s.find(phrase) != std::wstring::npos)
-			{
-				return true; // 找到完整短语 → 认定为伪拉丁文
-			}
+			g_total_kept++;
+			return false; // 匹配正则 → 保护，不删除
 		}
 	}
 
-	return false; // 保留
+	// 🚦 2. 含下划线 → 过滤
+	if (text.find(L"_") != std::wstring::npos) {
+		g_total_filtered++;
+		return true;
+	}
+
+	// 🚦 3. 仅由 {} 包裹（可能多个）
+	static std::wregex re_brace(LR"(^\{[^\}]+\}(?:\s*[ :]\s*\{[^\}]+\})*$)");
+	if (std::regex_match(text, re_brace)) {
+		g_total_filtered++;
+		return true;
+	}
+
+	// 🚦 4. 纯数字 / 符号组合
+	static std::wregex re_numeric(LR"(^(\d+|[^\w\s]{2,}|[^\w\s][A-Za-z])$)");
+	if (std::regex_match(text, re_numeric)) {
+		g_total_filtered++;
+		return true;
+	}
+
+	// 🚦 5. 没空格的多词拼接（驼峰命名）
+	static std::wregex re_camel(LR"(^[A-Za-z][a-z]+([A-Z][a-z][a-z0-9]*)+$)");
+	if (std::regex_match(text, re_camel)) {
+		g_total_filtered++;
+		return true;
+	}
+
+	// 🚦 6. 伪拉丁文常见词（不区分大小写）
+	static const std::vector<std::wstring> lorem_phrases = {
+		L"lorem ipsum",
+		L"dolor sit amet",
+		L"consectetur adipiscing",
+		L"adipiscing elit",
+		L"sed do eiusmod",
+		L"tempor incididunt",
+		L"labore et dolore",
+		L"magna aliqua",
+		L"ut enim ad",
+		L"quis nostrud",
+		L"ullamco laboris",
+		L"aliquip ex ea",
+		L"dolore eu fugiat",
+		L"sint occaecat",
+		L"cupidatat non proident"
+	};
+
+	std::wstring lower_s = text;
+	std::transform(lower_s.begin(), lower_s.end(), lower_s.begin(), ::towlower);
+
+	for (const auto& phrase : lorem_phrases) {
+		if (lower_s.find(phrase) != std::wstring::npos) {
+			g_total_filtered++;
+			return true; // 找到伪拉丁文短语 → 过滤
+		}
+	}
+	g_total_kept++;
+	return false; // 保留这个词
 }
 std::optional<std::pair<FText, size_t>> try_read_blueprint_text(std::vector<char> const& buffer, size_t index)
 {
@@ -753,7 +781,7 @@ void directory_extract(std::filesystem::path root, std::filesystem::path directo
 	}
 }
 
-namespace crc32
+namespace mcrc32
 {
 	constexpr auto CRCTablesSB8 = std::array<unsigned int, 256>{
 		0x00000000, 0x77073096, 0xee0e612c, 0x990951ba, 0x076dc419, 0x706af48f, 0xe963a535, 0x9e6495a3, 0x0edb8832, 0x79dcb8a4, 0xe0d5e91e, 0x97d2d988, 0x09b64c2b, 0x7eb17cbd, 0xe7b82d07, 0x90bf1d91,
@@ -1088,10 +1116,49 @@ void write_to_locres_file(bool old, locres_vector const& lv, std::filesystem::pa
 	}
 }
 
+
+void print_final_stats()
+{
+	std::wcout << L"\n=== protect_words 统计 ===\n";
+	std::wcout << L" 保护词表(protect_words Table):\n";
+	std::wcout << L"  读取行数(Read Lines): " << g_protect_words_list_for_stats.size() << L"\n";
+	std::wcout << L"  去重后(Removed Duplicates): " << g_protect_words.size() << L"\n";
+
+
+	std::wcout << L"\n 文本处理(Processed Text ):\n";
+	std::wcout << L"  读取(Read): " << g_total_read << L"\n";
+	std::wcout << L"  过滤(Filter): " << g_total_filtered << L"\n";
+	std::wcout << L"  保留(Persist): " << g_total_kept << L"\n";
+}
+
+
 int wmain(int argc, wchar_t** argv)
 {
-	// 加载保护词
-	g_protect_words = load_protect_words("protect_words.txt");
+	auto protect_words_list = read_csv_all_cells_exclude_first_row(L"protect_words.csv");
+
+	// ✅ 编译正则表达式
+	for (const auto& pattern : protect_words_list)
+	{
+		try
+		{
+			g_protect_regexes.emplace_back(pattern, std::wregex::ECMAScript | std::wregex::optimize);
+			// 👆 使用 ECMAScript 语法（最常用），并优化性能
+		}
+		catch (const std::regex_error& e)
+		{
+			std::wcerr << L"❌ 正则表达式编译失败: " << pattern << L" —— " << e.what() << std::endl;
+			// 可选择跳过或终止程序
+		}
+	}
+
+	// ✅ 关键！初始化保护词集合
+	g_protect_words = std::set<std::wstring>(protect_words_list.begin(), protect_words_list.end());
+
+	// ✅ 给统计用
+	g_protect_words_list_for_stats = protect_words_list;
+
+	// ✅ 注册退出时打印统计
+	std::atexit(print_final_stats);
 
 	std::locale::global(std::locale{ std::locale::classic(), "en_US.UTF-8", std::locale::ctype });
 
@@ -1187,7 +1254,7 @@ int wmain(int argc, wchar_t** argv)
 				if (unique_check.find(text.key) != unique_check.end())
 					continue;
 				unique_check.insert(text.key);
-				lv.back().second.push_back(FEntry{ text.key, crc32::StrCrc32(text.s), text.s, text.src });
+				lv.back().second.push_back(FEntry{ text.key, mcrc32::StrCrc32(text.s), text.s, text.src });
 			}
 		}
 
