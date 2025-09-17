@@ -1,3 +1,33 @@
+Fork from VD42
+
+添加了一个过滤功能
+
+当使用
+.\UE4TextExtractor content game.locres -raw-text-signatures=Package
+
+在后面添加 -Filter
+
+.\UE4TextExtractor content game.locres -raw-text-signatures=Package -Filter
+
+可过滤部分垃圾文本 默认过滤纯数字。纯符号，{}圈住的部分文本，一些符号+单个字母的文本，伪拉丁文，带“_“的文本。
+
+防止误删文本，可以在 protect_words.csv 内添加不删除的文本 支持正则搜索
+
+不导出的文本例子
+
+/01972C5C4BB6CAD4A5272F99CC4913F1 {HH}:{MM}
+/02086D7F4E204799257EAAB07DCD1BD6 MissionName
+/12C057654C88533F52266D8D318FA1CF LostItem
+/12ED557745EEB4B0C86536ADDB29824F 200
+/1931FA0D45D292CECB6FF381C1645B04 {name} : {value}
+/1984F6194DA94BACE332C3BD44F8827A 1
+/F8908B9D4E2351ECF67648B419D293E4 --
+EnglishSource/1B441C5B44CEB557A32DEE9BE9162A98 UNPSC Lorem ipsum dolor sit amet, consectetur adipiscing elit.....
+EnglishSource/C87FB08D4B446D871EF5048168D81F2E +P
+/2A0539A2450033DB8A22ED9DAFABE590 Title_SpecialColor_04
+
+
+
 # UE4TextExtractor
 
 Extract localizable text from .uasset, .uexp and .umap files and convert locres to txt and backward.
