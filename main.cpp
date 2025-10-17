@@ -1158,8 +1158,6 @@ void print_final_stats()
 	std::wcout << L"  保留(Persist): " << g_total_kept << L"\n";
 }
 
-// 用于保护词（正则和精确）统计
-
 int wmain(int argc, wchar_t** argv)
 {
 	auto protect_rows = read_csv_protect_words(L"protect_words.csv");
@@ -1488,3 +1486,4 @@ int wmain(int argc, wchar_t** argv)
 	print_help();
 	return 1;
 }
+
