@@ -200,8 +200,8 @@ bool filter_text(const std::wstring& text)
 	}
 
 	// 🚦 4. 纯数字 / 符号组合
-	static std::wregex re_numeric(LR"(^(\d+|[^\w\s]{2,}|[^\w\s][A-Za-z])$)");
-	if (std::regex_match(text, re_numeric)) {
+	static std::wregex re_noise(LR"(^$|^\s*$|^\s*[^\w\s]\s*$|^\s*[^\w\s]+\s*$|^\s*(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?\s*$|^\s*[^\w\s]*\d+[^\w\s]*\s*$|^\s*[^\w\s]+\s*\d+\s*%?$|^\s*\d+\s*[^\w\s]+\s*%?$|^\s*\d+:\d{2}:\d{2}\??\s*$|^\s*\d+\s*[^\w\s]+\s*\d+\s*%?$)");
+	if (std::regex_match(text, re_noise)) {
 		g_total_filtered++;
 		return true;
 	}
@@ -1158,6 +1158,8 @@ void print_final_stats()
 	std::wcout << L"  保留(Persist): " << g_total_kept << L"\n";
 }
 
+// 用于保护词（正则和精确）统计
+
 int wmain(int argc, wchar_t** argv)
 {
 	auto protect_rows = read_csv_protect_words(L"protect_words.csv");
@@ -1486,4 +1488,3 @@ int wmain(int argc, wchar_t** argv)
 	print_help();
 	return 1;
 }
-
