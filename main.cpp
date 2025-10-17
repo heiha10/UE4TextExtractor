@@ -1,4 +1,4 @@
-﻿
+
 #include <fstream>
 #include <filesystem>
 #include <array>
@@ -22,6 +22,8 @@
 std::set<std::wstring> g_protect_words;
 std::vector<std::wstring> g_protect_words_list_for_stats;
 std::vector<std::wregex> g_protect_regexes;
+std::vector<std::wstring> g_protect_exact;
+
 
 // 🆕 定义统计变量（必须带初始值！）
 unsigned __int64 g_total_read = 0;
@@ -53,42 +55,63 @@ std::string wstring_to_utf8(const std::wstring& wstr)
 }
 
 // ========== 你的 CSV 读取函数 ==========
-std::vector<std::wstring> read_csv_all_cells_exclude_first_row(const std::wstring& filename)
+struct ProtectWordsRow {
+    std::wstring regex_col;                // 第一列作为正则
+    std::vector<std::wstring> exact_cols;  // 其他列作为精确匹配
+};
+
+std::vector<ProtectWordsRow> read_csv_protect_words(const std::wstring& filename)
 {
-	std::vector<std::wstring> result;
-	std::string fname = wstring_to_utf8(filename);
+    std::vector<ProtectWordsRow> result;
+    std::string fname = wstring_to_utf8(filename);
 
-	std::ifstream file(fname);
-	if (!file.is_open()) {
-		std::wcout << L"❌ 无法打开文件: " << filename << L"\n";
-		return result;
-	}
+    std::ifstream file(fname);
+    if (!file.is_open()) {
+        std::wcout << L"❌ 无法打开文件: " << filename << L"\n";
+        return result;
+    }
 
-	std::string line;
-	bool firstLine = true;
+    std::string line;
+    bool firstLine = true;
 
-	while (std::getline(file, line)) {
-		if (firstLine) {
-			firstLine = false;
-			continue;
-		}
+    while (std::getline(file, line)) {
+        if (firstLine) {
+            firstLine = false;
+            continue; // 跳过首行
+        }
 
-		if (line.empty()) continue;
+        if (line.empty()) continue;
 
-		std::istringstream ss(line);
-		std::string cell;
-		while (std::getline(ss, cell, ',')) {
-			cell.erase(0, cell.find_first_not_of(" \t\r\n"));
-			cell.erase(cell.find_last_not_of(" \t\r\n") + 1);
-			if (!cell.empty()) {
-				result.push_back(utf8_to_wstring(cell));
-			}
-		}
-	}
+        std::istringstream ss(line);
+        std::string cell;
+        ProtectWordsRow row;
+        size_t col_index = 0;
 
-	file.close();
-	return result;
+        while (std::getline(ss, cell, ',')) {
+            // 去掉首尾空白
+            cell.erase(0, cell.find_first_not_of(" \t\r\n"));
+            cell.erase(cell.find_last_not_of(" \t\r\n") + 1);
+
+            if (cell.empty()) {
+                col_index++;
+                continue;
+            }
+
+            if (col_index == 0) {
+                row.regex_col = utf8_to_wstring(cell); // 第一列作为正则
+            } else {
+                row.exact_cols.push_back(utf8_to_wstring(cell)); // 其他列作为精确
+            }
+            col_index++;
+        }
+
+        result.push_back(row);
+    }
+
+    file.close();
+    return result;
 }
+
 
 struct FText
 {
@@ -150,6 +173,16 @@ bool filter_text(const std::wstring& text)
 		{
 			g_total_kept++;
 			return false; // 匹配正则 → 保护，不删除
+		}
+	}
+
+	// 再检查精确保护词
+	for (const auto& word : g_protect_exact)
+	{
+		if (text == word) // 完全匹配
+		{
+			g_total_kept++;
+			return false; // 匹配精确词 → 保护，不删除
 		}
 	}
 
@@ -1119,43 +1152,35 @@ void write_to_locres_file(bool old, locres_vector const& lv, std::filesystem::pa
 
 void print_final_stats()
 {
-	std::wcout << L"\n=== protect_words 统计 ===\n";
-	std::wcout << L" 保护词表(protect_words Table):\n";
-	std::wcout << L"  读取行数(Read Lines): " << g_protect_words_list_for_stats.size() << L"\n";
-	std::wcout << L"  去重后(Removed Duplicates): " << g_protect_words.size() << L"\n";
-
-
 	std::wcout << L"\n 文本处理(Processed Text ):\n";
 	std::wcout << L"  读取(Read): " << g_total_read << L"\n";
 	std::wcout << L"  过滤(Filter): " << g_total_filtered << L"\n";
 	std::wcout << L"  保留(Persist): " << g_total_kept << L"\n";
 }
 
+// 用于保护词（正则和精确）统计
 
 int wmain(int argc, wchar_t** argv)
 {
-	auto protect_words_list = read_csv_all_cells_exclude_first_row(L"protect_words.csv");
-
-	// ✅ 编译正则表达式
-	for (const auto& pattern : protect_words_list)
-	{
-		try
-		{
-			g_protect_regexes.emplace_back(pattern, std::wregex::ECMAScript | std::wregex::optimize);
-			// 👆 使用 ECMAScript 语法（最常用），并优化性能
+	auto protect_rows = read_csv_protect_words(L"protect_words.csv");
+	for (const auto& row : protect_rows) {
+		if (!row.regex_col.empty()) {
+			try {
+				g_protect_regexes.emplace_back(std::wregex(row.regex_col, std::regex_constants::icase));
+			}
+			catch (...) {
+				g_protect_exact.push_back(row.regex_col); // 构造失败当精确词
+			}
 		}
-		catch (const std::regex_error& e)
-		{
-			std::wcerr << L"❌ 正则表达式编译失败: " << pattern << L" —— " << e.what() << std::endl;
-			// 可选择跳过或终止程序
+		for (const auto& word : row.exact_cols) {
+			g_protect_exact.push_back(word);
 		}
 	}
 
-	// ✅ 关键！初始化保护词集合
-	g_protect_words = std::set<std::wstring>(protect_words_list.begin(), protect_words_list.end());
 
-	// ✅ 给统计用
-	g_protect_words_list_for_stats = protect_words_list;
+	g_protect_words = std::set<std::wstring>(g_protect_exact.begin(), g_protect_exact.end());
+	g_protect_words_list_for_stats = std::vector<std::wstring>(g_protect_words.begin(), g_protect_words.end());
+
 
 	// ✅ 注册退出时打印统计
 	std::atexit(print_final_stats);
